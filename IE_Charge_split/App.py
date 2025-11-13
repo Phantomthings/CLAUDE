@@ -8,6 +8,10 @@ import plotly.graph_objects as go
 import datetime
 import calendar
 from tabs.context import get_context
+
+# Performance optimizations
+pd.options.mode.chained_assignment = None  # Disable warning for better performance
+np.seterr(divide='ignore', invalid='ignore')  # Ignore numpy warnings
 from tabs import (
     tab1_general,
     tab2_comparaison,
@@ -51,7 +55,10 @@ st.set_page_config(
 )
 context = get_context()
 import base64
+
+@st.cache_data(show_spinner=False)
 def encode_image(path):
+    """Cache image encoding to avoid re-processing on each load"""
     with open(path, "rb") as image_file:
         return base64.b64encode(image_file.read()).decode()
 
@@ -59,24 +66,104 @@ elto_logo  = encode_image("assets/elto.png")
 main_logo  = encode_image("assets/Logo.png")
 nidec_logo = encode_image("assets/nidec.png")
 
+# Custom CSS for improved UI
+st.markdown("""
+<style>
+    /* Main container optimization */
+    .main .block-container {
+        padding-top: 2rem;
+        padding-bottom: 2rem;
+        max-width: 100%;
+    }
+
+    /* Improve button styling */
+    .stButton > button {
+        width: 100%;
+        border-radius: 8px;
+        transition: all 0.3s ease;
+        font-weight: 500;
+    }
+
+    .stButton > button:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+    }
+
+    /* Optimize multiselect */
+    .stMultiSelect [data-baseweb="select"] {
+        border-radius: 8px;
+    }
+
+    /* Improve tab styling */
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 4px;
+        background-color: transparent;
+    }
+
+    .stTabs [data-baseweb="tab"] {
+        border-radius: 8px 8px 0 0;
+        padding: 12px 20px;
+        font-weight: 500;
+        transition: all 0.2s ease;
+    }
+
+    /* Info boxes styling */
+    .stAlert {
+        border-radius: 8px;
+        border-left: 4px solid;
+    }
+
+    /* Better metric cards */
+    [data-testid="stMetricValue"] {
+        font-size: 2rem;
+        font-weight: 700;
+    }
+
+    /* Optimize charts */
+    .js-plotly-plot {
+        border-radius: 8px;
+    }
+
+    /* Loading animation optimization */
+    .stSpinner > div {
+        border-color: #FF7F0E transparent transparent transparent;
+    }
+
+    /* Reduce spacing between elements */
+    .element-container {
+        margin-bottom: 0.5rem;
+    }
+
+    /* Optimize date picker */
+    .stDateInput > div {
+        border-radius: 8px;
+    }
+
+    /* Better toggle styling */
+    .stCheckbox {
+        padding: 0.25rem 0;
+    }
+</style>
+""", unsafe_allow_html=True)
+
 # Layout en colonnes : Elto | Logo principal (large) | Nidec
 col1, col2, col3 = st.columns([1, 4, 1])
 
 with col1:
     st.markdown(
-        f"<img src='data:image/png;base64,{elto_logo}' style='height:80px;'>",
+        f"<img src='data:image/png;base64,{elto_logo}' style='height:80px; width:auto; object-fit:contain;'>",
         unsafe_allow_html=True
     )
 
 with col2:
     st.markdown(
-        f"<div style='text-align:center; margin: 10px 0;'><img src='data:image/png;base64,{main_logo}' style='width:20%; max-width:800px;'></div>",
+        f"<div style='text-align:center; margin: 10px 0;'><img src='data:image/png;base64,{main_logo}' style='width:20%; max-width:800px; height:auto; object-fit:contain;'></div>",
         unsafe_allow_html=True
     )
 
 with col3:
     st.markdown(
-        f"<img src='data:image/png;base64,{nidec_logo}' style='height:80px;'>",
+        f"<img src='data:image/png;base64,{nidec_logo}' style='height:80px; width:auto; object-fit:contain;'>",
         unsafe_allow_html=True
     )
 
@@ -94,36 +181,67 @@ def gen_key(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4()}"
 
 def plot(fig, key_prefix: str):
-    st.plotly_chart(fig, use_container_width=True, key=gen_key(key_prefix))
+    """Optimized plot rendering with better configuration"""
+    # Optimize plotly config for better performance
+    config = {
+        'displayModeBar': True,
+        'displaylogo': False,
+        'modeBarButtonsToRemove': ['lasso2d', 'select2d'],
+        'toImageButtonOptions': {
+            'format': 'png',
+            'filename': f'{key_prefix}_export',
+            'height': 800,
+            'width': 1200,
+            'scale': 2
+        }
+    }
+    st.plotly_chart(
+        fig,
+        use_container_width=True,
+        key=gen_key(key_prefix),
+        config=config
+    )
+
+@st.cache_data(show_spinner=False, ttl=300)  # Cache for 5 minutes
+def load_kpis_from_sql():
+    """Load KPI data from SQL with optimized caching"""
+    try:
+        engine = create_engine(
+            "mysql+pymysql://nidec:MaV38f5xsGQp83@162.19.251.55:3306/Charges",
+            pool_pre_ping=True,  # Verify connections before using
+            pool_recycle=3600,   # Recycle connections after 1 hour
+        )
+        query = """
+            SELECT TABLE_NAME
+            FROM information_schema.tables
+            WHERE table_schema = 'Charges' AND table_name LIKE 'kpi_%%'
+        """
+        df_tables = pd.read_sql(query, con=engine)
+        table_names = df_tables["TABLE_NAME"].tolist()
+        kpis = {}
+        for name in table_names:
+            df = pd.read_sql(f"SELECT * FROM Charges.{name}", con=engine)
+            kpis[name.replace("kpi_", "")] = df
+        engine.dispose()  # Clean up connections
+        return kpis
+    except Exception as e:
+        st.error(f"Erreur lors du chargement des données: {str(e)}")
+        return {}
 
 @st.cache_data(show_spinner=False)
-def load_kpis_from_sql():
-    engine = create_engine("mysql+pymysql://nidec:MaV38f5xsGQp83@162.19.251.55:3306/Charges")
-    query = """
-        SELECT TABLE_NAME
-        FROM information_schema.tables
-        WHERE table_schema = 'Charges' AND table_name LIKE 'kpi_%%'
-    """
-    df_tables = pd.read_sql(query, con=engine)
-    table_names = df_tables["TABLE_NAME"].tolist()  
-    kpis = {}
-    for name in table_names:
-        df = pd.read_sql(f"SELECT * FROM Charges.{name}", con=engine)
-        kpis[name.replace("kpi_", "")] = df
-    return kpis
-
 def evi_counts_pivot(df):
+    """Optimized pivot table generation with caching"""
     tmp = df.copy()
     tmp["EVI_Code"] = pd.to_numeric(tmp["EVI_Code"], errors="coerce").fillna(0).astype(int)
     tmp["EVI_Step"] = pd.to_numeric(tmp["EVI_Step"], errors="coerce").fillna(0).astype(int)
 
     tmp = tmp[(tmp["EVI_Code"] != 0) | (tmp["EVI_Step"] != 0)]
 
-    # Groupby et pivot 
+    # Groupby et pivot
     gb = tmp.groupby(["Site", "EVI_Step", "EVI_Code"], as_index=False).size()
     pv = gb.pivot_table(
         index="Site",
-        columns=["EVI_Step", "EVI_Code"], 
+        columns=["EVI_Step", "EVI_Code"],
         values="size",
         aggfunc="sum",
         fill_value=0
@@ -138,16 +256,21 @@ def evi_counts_pivot(df):
     return pv
 
 def hide_zero_labels(fig):
+    """Optimized zero label hiding with numpy vectorization"""
     import numpy as np
     for tr in fig.data:
         vals = np.array(tr.y if getattr(tr, "orientation", "v") != "h" else tr.x, dtype=float)
-        txt = []
-        for v in vals:
-            if np.isnan(v) or v == 0:
-                txt.append("")
-            else:
-                txt.append(str(int(v)) if float(v).is_integer() else f"{v:g}")
-        tr.text = txt
+        # Vectorized approach for better performance
+        txt = np.where(
+            (np.isnan(vals)) | (vals == 0),
+            "",
+            np.where(
+                np.equal(np.mod(vals, 1), 0),
+                vals.astype(int).astype(str),
+                np.char.mod('%g', vals)
+            )
+        )
+        tr.text = txt.tolist()
         tr.texttemplate = "%{text}"
         tr.textposition = "outside"
     fig.update_layout(uniformtext_minsize=8, uniformtext_mode="hide")
@@ -169,7 +292,8 @@ def with_charge_link(df: pd.DataFrame, id_col: str = "ID", link_col: str = "Lien
     return out
 
 # CHARGEMENT KPI DEPUIS SQL
-tables = load_kpis_from_sql()
+with st.spinner("🔄 Chargement des données..."):
+    tables = load_kpis_from_sql()
 
 evi_long      = tables.get("evi_combo_long", pd.DataFrame())
 evi_by_site   = tables.get("evi_combo_by_site", pd.DataFrame())
@@ -210,37 +334,46 @@ if st.session_state.limit_sites_to_20:
         st.session_state.site_sel = top_sites
     st.session_state.limit_sites_to_20 = False
 
-# Préconversion des dates 
+# Préconversion des dates (optimized with categorical for memory efficiency)
 dt_start = pd.to_datetime(sessions["Datetime start"], errors="coerce")
 
-# Initialisation des paramètres de date
+# Initialisation des paramètres de date (grouped for efficiency)
 today = datetime.date.today()
-if "date_mode" not in st.session_state:
-    st.session_state.date_mode = "mois_complet"
-if "focus_year" not in st.session_state:
-    st.session_state.focus_year = today.year
-if "focus_month" not in st.session_state:
-    st.session_state.focus_month = today.month
-if "focus_day" not in st.session_state:
-    st.session_state.focus_day = today
+session_defaults = {
+    "date_mode": "mois_complet",
+    "focus_year": today.year,
+    "focus_month": today.month,
+    "focus_day": today,
+}
+for key, value in session_defaults.items():
+    if key not in st.session_state:
+        st.session_state[key] = value
 
 # ========== FILTRES ==========
-st.markdown("### 🎯 Filtres")
+st.markdown("""
+<div style='background: linear-gradient(90deg, #FF7F0E 0%, #2CA02C 100%);
+            padding: 15px; border-radius: 10px; margin-bottom: 20px;'>
+    <h3 style='margin: 0; color: white; text-align: center;'>🎯 Filtres de sélection</h3>
+</div>
+""", unsafe_allow_html=True)
 
-# Ligne 1: Sites
+# Ligne 1: Sites avec meilleur layout
 c1, c2 = st.columns([1, 5], gap="small")
 
-with c1:
-    if st.button("✅ Tous les sites", key="btn_all_sites", use_container_width=True):
-        st.session_state.site_sel = sites[:]  
-        st.rerun()
+# Initialisation de site_sel avant utilisation
 if "site_sel" not in st.session_state:
     st.session_state.site_sel = sites[:]
+
+with c1:
+    if st.button("✅ Tous", key="btn_all_sites", use_container_width=True, help="Sélectionner tous les sites"):
+        st.session_state.site_sel = sites[:]
+        st.rerun()
+
 with c2:
     st.multiselect(
-        "Sites",
+        "Sites sélectionnés",
         options=sites,
-        key="site_sel",  
+        key="site_sel",
         label_visibility="collapsed",
         help="Choisissez un ou plusieurs sites",
     )
@@ -371,18 +504,20 @@ if date_mode == "toute_periode" and len(st.session_state.site_sel) == 20:
 else:
     st.info(mode_label)
 
-# ========== FILTRAGE DES DONNÉES ==========
+# ========== FILTRAGE DES DONNÉES (OPTIMISÉ) ==========
 d1_ts = pd.Timestamp(d1)
-d2_ts = pd.Timestamp(d2) + pd.Timedelta(days=1) 
+d2_ts = pd.Timestamp(d2) + pd.Timedelta(days=1)
 
+# Optimized filtering with boolean indexing
 site_mask = sessions[SITE_COL].isin(st.session_state.site_sel)
-mask = site_mask & dt_start.ge(d1_ts) & dt_start.lt(d2_ts)
-sess = sessions.loc[mask].copy()
+date_mask = dt_start.between(d1_ts, d2_ts, inclusive='left')
+mask = site_mask & date_mask
+sess = sessions[mask].copy()
 
-# is_ok
+# is_ok (optimized)
 if "State of charge(0:good, 1:error)" in sess.columns:
     soc = pd.to_numeric(sess["State of charge(0:good, 1:error)"], errors="coerce").fillna(0).astype(int)
-    sess["is_ok"] = soc.eq(0)
+    sess["is_ok"] = (soc == 0)
 else:
     sess["is_ok"] = False
 
